@@ -1,0 +1,10 @@
+python>=3.8
+torch>=1.10.0
+torchvision>=0.11.1
+torcheeg>=0.2.4
+numpy>=1.21.0
+scipy>=1.7.0
+scikit-learn>=1.0.2
+h5py>=3.6.0
+tqdm>=4.62.3
+matplotlib>=3.5.1
