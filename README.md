@@ -17,7 +17,7 @@ With the rapid expansion of brain-computer interfaces (BCIs) into consumer indus
 ## 🛠️ Framework Architecture  
 RPW-EEG’s implementation consists of two core stages, as illustrated in Figure 1 of the paper:  
 
-
+(images/pic1.png)
 
 ### 1. Encoder-Decoder Training  
 - **Encoder**: Designed to embed copyright information into EEG data using transition layers (convolution, batch normalization, ReLU) and multi-scale watermark embedding layers. It preserves original EEG features via MSE loss .  
