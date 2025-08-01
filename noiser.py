@@ -11,6 +11,9 @@ class Identity(nn.Module):
     def forward(self, noised_and_cover):
         return noised_and_cover
     
+# 时域变化
+
+# 增加高斯噪声
 class add_gaussian_noise(nn.Module):
     def __init__(self, std=0.01):
         super(add_gaussian_noise, self).__init__()
@@ -20,6 +23,7 @@ class add_gaussian_noise(nn.Module):
         noised_and_cover_noise = noised_and_cover + noise
         return noised_and_cover_noise
     
+# 平滑的变为0
 class SmoothTimeMask(nn.Module):
     def __init__(self, mask_len_samples):
         super(SmoothTimeMask, self).__init__()
@@ -39,6 +43,7 @@ class SmoothTimeMask(nn.Module):
         ).float().to(X.device)
         return X * mask
 
+# 时间轴的反转
 class time_reverse(nn.Module):
     def __init__(self):
         super(time_reverse, self).__init__()
@@ -46,6 +51,7 @@ class time_reverse(nn.Module):
         noised_and_coverr = torch.flip(noised_and_cover, [-1])
         return noised_and_coverr
 
+# 符号的反转
 class sign_reverse(nn.Module):
     def __init__(self):
         super(sign_reverse, self).__init__()
@@ -53,6 +59,9 @@ class sign_reverse(nn.Module):
         noised_and_coverr = -noised_and_cover
         return noised_and_coverr
         
+# 频域的变化
+
+# 频域的移位
 class FrequencyShift(nn.Module):
     def __init__(self, shift_amount, dim=-1):
         super(FrequencyShift, self).__init__()
@@ -75,6 +84,7 @@ class FrequencyShift(nn.Module):
 
         return X_shifted
     
+# 傅里叶变换
 def check_random_state(seed):
     if seed is None or isinstance(seed, int):
         return np.random.RandomState(seed)
@@ -82,7 +92,6 @@ def check_random_state(seed):
         return seed
     else:
         raise ValueError(f"Invalid random state: {seed}")
-
 def _new_random_fft_phase_odd(batch_size, c, n, device, random_state):
     rng = check_random_state(random_state)
     random_phase = torch.from_numpy(
@@ -96,7 +105,6 @@ def _new_random_fft_phase_odd(batch_size, c, n, device, random_state):
         ],
         dim=-1,
     )
-
 def _new_random_fft_phase_even(batch_size, c, n, device, random_state):
     rng = check_random_state(random_state)
     random_phase = torch.from_numpy(
@@ -147,6 +155,7 @@ class FTSurrogate(nn.Module):
         return transformed_X
 
 
+# 带通滤波器
 class BandStopFilter(nn.Module):
     def __init__(self, sfreq, bandwidth, freqs_to_notch):
         super(BandStopFilter, self).__init__()
@@ -175,6 +184,11 @@ class BandStopFilter(nn.Module):
 
         return transformed_X
     
+    
+    
+# 空域上的变换
+
+#通道对称
 def check_random_state(seed):
     if seed is None or isinstance(seed, int):
         return np.random.RandomState(seed)
@@ -208,6 +222,7 @@ class ChannelSymmetry(nn.Module):
 
         return transformed_X
 
+#通道丢弃
 def check_random_state(seed):
     if seed is None or isinstance(seed, int):
         return np.random.RandomState(seed)
@@ -238,6 +253,7 @@ class ChannelDropout(nn.Module):
 
         return transformed_X
 
+#通道切换
 def check_random_state(seed):
     if seed is None or isinstance(seed, int):
         return np.random.RandomState(seed)
@@ -312,13 +328,14 @@ class Noiser(nn.Module):
         noise_layers = [self.spatial_noise, self.frequency_noise, self.temporal_noise]
 
     def forward(self, x):
+        # 从每个噪声类别中随机选择一个具体的噪声层
         x = torch.squeeze(x)
         spatial_noise_layer = np.random.choice(self.spatial_noise, 1)[0]
         x = spatial_noise_layer(x)
-        frequency_noise_layer = np.random.choice(self.frequency_noise, 1)[0]
-        x = frequency_noise_layer(x)
-        temporal_noise_layer = np.random.choice(self.temporal_noise, 1)[0]
-        x= temporal_noise_layer(x)
+        # frequency_noise_layer = np.random.choice(self.frequency_noise, 1)[0]
+        # x = frequency_noise_layer(x)
+        # temporal_noise_layer = np.random.choice(self.temporal_noise, 1)[0]
+        # x= temporal_noise_layer(x)
         x = x.to(self.device)
         x = torch.unsqueeze(x, 1)
         

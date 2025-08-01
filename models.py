@@ -9,6 +9,7 @@ from scipy.fftpack import dct, idct
 # import pywt
 from collections import OrderedDict
 
+
 class Discriminator(nn.Module):
     """
     Discriminator network. Receives an image and has to figure out whether it has a watermark inserted into it, or not.
@@ -57,38 +58,105 @@ class HiddenEncoder(nn.Module):
         self.tanh = nn.Tanh()
 
     def forward(self, imgs, msgs):
-
+        # 传入 图像以及水印二值数据
         msgs = msgs.unsqueeze(-1).unsqueeze(-1) # b l 1 1
         msgs = msgs.expand(-1,-1, imgs.size(-2), imgs.size(-1)) # b l h w
 
         encoded_image = self.conv_bns(imgs) # b c h w
 
+        # 数据进行拼接 二值水印数据 编码的图像 源图像
         concat = torch.cat([msgs, encoded_image, imgs], dim=1) # b l+c+1 h w
         im_w = self.after_concat_layer(concat)
         im_w = self.final_layer(im_w)
 
-        if self.last_tanh:
-            im_w = self.tanh(im_w)
+        # if self.last_tanh:
+        im_w = self.tanh(im_w)
 
         return im_w
 
 class HiddenDecoder(nn.Module):
+    """
+    Decoder module. Receives a watermarked image and extracts the watermark.
+    The input image may have various kinds of noise applied to it,
+    such as Crop, JpegCompression, and so on. See Noise layers for more.
+    """
     def __init__(self, num_blocks, num_bits, channels):
 
         super(HiddenDecoder, self).__init__()
+
+        # CCNN模型的输入通道数是4
+        
         layers = [ConvBNRelu(1, channels)]
         for _ in range(num_blocks - 1):
             layers.append(ConvBNRelu(channels, channels))
+
         layers.append(ConvBNRelu(channels, num_bits))
         layers.append(nn.AdaptiveAvgPool2d(output_size=(1, 1)))
         self.layers = nn.Sequential(*layers)
+
         self.linear = nn.Linear(num_bits, num_bits)
 
     def forward(self, img_w):
+
         x = self.layers(img_w) # b d 1 1
         x = x.squeeze(-1).squeeze(-1) # b d
         x = self.linear(x) # b d
         return x
+
+class DvmarkDecoder(nn.Module):
+    def __init__(self, num_blocks, num_bits, channels, last_sigmoid=True):
+        super(DvmarkDecoder, self).__init__()
+        
+        # upsample x2 to reverse the downsample operation
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        
+        # conv layers for upsampled
+        num_blocks_scale2 = 3
+        scale2_layers = [ConvBNRelu(1, channels*2)]
+        for _ in range(num_blocks_scale2-1):
+            layer = ConvBNRelu(channels*2, channels*2)
+            scale2_layers.append(layer)
+        self.scale2_layers = nn.Sequential(*scale2_layers)
+
+        # upsample x2 to match the original image size
+        self.upsample_final = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        
+        # conv layers for original scale
+        num_blocks_scale1 = 3
+        scale1_layers = [ConvBNRelu(channels*2, channels)]
+        for _ in range(num_blocks_scale1-1):
+            layer = ConvBNRelu(channels, channels)
+            scale1_layers.append(layer)
+        self.scale1_layers = nn.Sequential(*scale1_layers)
+        
+        # final conv layer to get the image
+        self.final_layer_img = nn.Conv2d(channels, 4, kernel_size=1)
+        
+        # final conv layer to extract the message
+        self.final_layer_msg = nn.Conv2d(channels, num_bits, kernel_size=1)
+        
+        self.last_sigmoid = last_sigmoid
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, im_w):
+        # Reverse the encoder's downsample and fusion process
+        scale2 = self.upsample(im_w) # b c*2 h*2 w*2
+        scale2 = self.scale2_layers(scale2) # b c*2 h*2 w*2
+        
+        # Upsample to original resolution
+        scale1 = self.upsample_final(scale2) # b c*2 h*4 w*4
+        scale1 = self.scale1_layers(scale1) # b c h*4 w*4
+        
+        # Recover the image
+        img_rec = self.final_layer_img(scale1) # b 1 h*4 w*4
+        if self.last_sigmoid:
+            img_rec = self.sigmoid(img_rec)
+
+        # Extract the message
+        msg_rec = self.final_layer_msg(scale1) # b num_bits h*4 w*4
+        msg_rec = torch.mean(msg_rec, dim=(2, 3)) # b num_bits (average over spatial dimensions)
+
+        return msg_rec
 
 class EncoderDecoder(nn.Module):
     def __init__(
@@ -120,17 +188,100 @@ class EncoderDecoder(nn.Module):
             eval_mode: bool = False,
             eval_aug: nn.Module = nn.Identity(),
     ):
+        """
+        Does the full forward pass of the encoder-decoder network:
+        - encodes the message into the image
+        - attenuates the watermark
+        - augments the image
+        - decodes the watermark
 
-        imgs = torch.unsqueeze(imgs,1)
+        Args:
+            imgs: b c h w
+            msgs: b l
+        """
+        # imgs = torch.unsqueeze(imgs,1)
+        # heatmap = torch.unsqueeze(heatmap,1)
+        # encoder
         deltas_w = self.encoder(imgs, msgs)  # b c h w
+
+        # add heatmaps
+        # if self.attenuation is not None:
+        #     deltas_w = deltas_w * heatmap  # # b c h w * b 1 h w -> b c h w
         imgs_w = self.scaling_i * imgs + self.scaling_w * deltas_w  # b c h w
 
-        imgs_aug = self.nosier(imgs_w)
-        imgs_aug = imgs_w
-        fts = self.decoder(imgs_aug)  # b c h w -> b d
+        # data augmentation
+        if eval_mode:
+            imgs_aug = eval_aug(imgs_w)
+            # imgs_aug = self.nosier(imgs_aug)
+            fts = self.decoder(imgs_aug)  # b c h w -> b d
+        else:
+            # imgs_aug = self.nosier(imgs_w)
+            imgs_aug = imgs_w
+            fts = self.decoder(imgs_aug)  # b c h w -> b d
+
         fts = fts.view(-1, self.num_bits, self.redundancy)  # b k*r -> b k r
         fts = torch.sum(fts, dim=-1)  # b k r -> b k
-        return fts, (imgs_w, imgs_aug)
+
+        return fts, (imgs_w, imgs_aug),self.decoder
+
+class DvmarkEncoder(nn.Module):
+
+    def __init__(self, num_blocks, num_bits, channels, last_tanh=True):
+        super(DvmarkEncoder, self).__init__()
+
+        transform_layers = [ConvBNRelu(1, channels)]
+        for _ in range(num_blocks-1):
+            layer = ConvBNRelu(channels, channels)
+            transform_layers.append(layer)
+        self.transform_layers = nn.Sequential(*transform_layers)
+
+        # conv layers for original scale
+        num_blocks_scale1 = 3
+        scale1_layers = [ConvBNRelu(channels+num_bits, channels*2)]
+        for _ in range(num_blocks_scale1-1):
+            layer = ConvBNRelu(channels*2, channels*2)
+            scale1_layers.append(layer)
+        self.scale1_layers = nn.Sequential(*scale1_layers)
+
+        # downsample x2
+        self.avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        # conv layers for downsampled
+        num_blocks_scale2 = 3
+        scale2_layers = [ConvBNRelu(channels*2+num_bits, channels*4), ConvBNRelu(channels*4, channels*2)]
+        for _ in range(num_blocks_scale2-2):
+            layer = ConvBNRelu(channels*2, channels*2)
+            scale2_layers.append(layer)
+        self.scale2_layers = nn.Sequential(*scale2_layers)
+
+        # upsample x2
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        
+        self.final_layer = nn.Conv2d(channels*2, 1, kernel_size=1)
+
+        self.last_tanh = last_tanh
+        self.tanh = nn.Tanh()
+
+    def forward(self, imgs, msgs):
+
+        encoded_image = self.transform_layers(imgs) # b c h w
+
+        msgs = msgs.unsqueeze(-1).unsqueeze(-1) # b l 1 1
+
+        scale1 = torch.cat([msgs.expand(-1,-1, imgs.size(-2), imgs.size(-1)), encoded_image], dim=1) # b l+c h w
+        scale1 = self.scale1_layers(scale1) # b c*2 h w
+
+        scale2 = self.avg_pool(scale1) # b c*2 h/2 w/2
+        scale2 = torch.cat([msgs.expand(-1,-1, imgs.size(-2)//2, imgs.size(-1)//2), scale2], dim=1) # b l+c*2 h/2 w/2
+        scale2 = self.scale2_layers(scale2) # b c*2 h/2 w/2
+
+        scale1 = scale1 + self.upsample(scale2) # b c*2 h w
+        im_w = self.final_layer(scale1) # b 3 h w
+
+        if self.last_tanh:
+            im_w = self.tanh(im_w)
+
+        return im_w
 
 class ConvBNRelu(nn.Module):
     """
@@ -262,6 +413,8 @@ class RevealNet(nn.Module):
         self.linear = nn.Linear(nhf, num_bits)
         
     def forward(self, stego):
+        # Y = 0 + 0.299 * stego[:, 0, :, :] + 0.587 * stego[:, 1, :, :] + 0.114 * stego[:, 2, :, :]
+        # Y = Y.unsqueeze(1)
         output = self.main(stego)
         # x = self.layers(img_w) # b d 1 1
         output = output.squeeze(-1).squeeze(-1) # b d
@@ -276,3 +429,79 @@ class RevealNet(nn.Module):
                 nn.init.xavier_uniform(m.weight)
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.xavier_uniform(m.weight)
+
+def get_model_identify(architecture):
+    match architecture:
+        case "CCNN":
+            from torcheeg.models import CCNN
+
+            return CCNN(num_classes=32, in_channels=4, grid_size=(9, 9))
+
+        case "TSCeption":
+            from torcheeg.models import TSCeption
+
+            return TSCeption(
+                num_classes=32,
+                num_electrodes=28,
+                sampling_rate=128,
+                num_T=60,
+                num_S=60,
+                hid_channels=128,
+                dropout=0.5,
+            )
+
+        case "EEGNet":
+            from torcheeg.models import EEGNet
+
+            return EEGNet(
+                chunk_size=128,
+                num_electrodes=32,
+                dropout=0.5,
+                kernel_1=64,
+                kernel_2=16,
+                F1=16,
+                F2=32,
+                D=4,
+                num_classes=32,
+            )
+
+        case _:
+            raise ValueError(f"Invalid architecture: {architecture}")
+
+def get_model(architecture):
+    match architecture:
+        case "CCNN":
+            from torcheeg.models import CCNN
+
+            return CCNN(num_classes=16, in_channels=4, grid_size=(9, 9))
+
+        case "TSCeption":
+            from torcheeg.models import TSCeption
+
+            return TSCeption(
+                num_classes=16,
+                num_electrodes=28,
+                sampling_rate=128,
+                num_T=60,
+                num_S=60,
+                hid_channels=128,
+                dropout=0.5,
+            )
+
+        case "EEGNet":
+            from torcheeg.models import EEGNet
+
+            return EEGNet(
+                chunk_size=128,
+                num_electrodes=32,
+                dropout=0.5,
+                kernel_1=64,
+                kernel_2=16,
+                F1=16,
+                F2=32,
+                D=4,
+                num_classes=16,
+            )
+
+        case _:
+            raise ValueError(f"Invalid architecture: {architecture}")
